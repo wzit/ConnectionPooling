@@ -162,26 +162,26 @@ class ConnectionQueue
 
 
 
-template <class connType, class Lock, class LockPolicy > 
-class ConnectionRoundRobin
+template < class connType > 
+class ConnectionLoadBalancer
 {
     Lock _mx;
 
     // Host name based lookup connection pool map typedef
-    typedef std::map< std::string, ConnectionQueue< connType, NoLock, NoLocking > > MapRR;
-    typedef MapRR::iterator ItRR;
+    typedef std::map< std::string, ConnectionQueue< connType, NoLock, NoLocking > > MapLB;
+    typedef MapLB::iterator ItLB;
 
-    MapRR _mapRR;
-    ItRR  _itRR;
+    MapLB _mapLB;
+    ItLB  _itLB;
 
 public:
 
-    ConnectionRoundRobin()
+    ConnectionLoadBalancer()
     {
-        _itRR = _mapRR.begin();
+        _itLB = _mapLB.begin();
     }
 
-    ~ConnectionRoundRobin()
+    ~ConnectionLoadBalancer()
     {
     }
 
@@ -190,37 +190,37 @@ public:
         connType* pConn = NULL;
         LockPolicy  scopelock( _mx );
 
-        if( _mapRR.empty() ) // prevent a nasty loop when there are not Remotes
+        if( _mapLB.empty() ) // prevent a nasty loop when there are not Remotes
             return NULL;
 
         // Direct connection retrieval for closing conns in task thread : ?????
         if( szHost != NULL )
         {
-            if( _mapRR.find(szHost) != _mapRR.end() )
+            if( _mapLB.find(szHost) != _mapLB.end() )
             {
-                if( _mapRR[szHost].size() > 0 )
+                if( _mapLB[szHost].size() > 0 )
                 {
-                        pConn = _mapRR[szHost].popConnection();
+                        pConn = _mapLB[szHost].popConnection();
                 }
             }
             return pConn;
         }
 
         // Round-robin here
-        if( ++_itRR == _mapRR.end() )
-            _itRR = _mapRRset.begin();
+        if( ++_itLB == _mapLB.end() )
+            _itLB = _mapLBset.begin();
 
         // if the queue is empty go to the next available queue with connections
-        if( !_itRR->second.empty() && _itRR->second.enabled() )
+        if( !_itLB->second.empty() && _itLB->second.enabled() )
         {
-            pConn = _itRR->popConnection();
+            pConn = _itLB->popConnection();
         }
 
         if( pConn == NULL )
         {
             // go to next queue in a round until we get a connection or come back to this one
-            for( typename MapRR::iterator mapIt = _mapRR.begin();
-                    mapIt != _mapRR.end(); mapIt++ )
+            for( typename MapLB::iterator mapIt = _mapLB.begin();
+                    mapIt != _mapLB.end(); mapIt++ )
             {
                 // Look for a queue with connections
                 if( !mapIt->second.empty() )
@@ -239,61 +239,147 @@ public:
     }
 
     // uses host value to place in proper map
-    void pushConnection(connType* pConn)
+    bool pushConnection(connType* pConn)
     {
         LockPolicy  scopelock(_mx);
 
-        _mapRR[pConn->host()].push( pConn );
-    }
+        typename MapLB::iterator mapIt = _mapLB.find( host );
 
-    void disableQueue( std::string host)
-    {
-        LockPolicy  scopelock(_mx);
-
-        typename MapRR::iterator mapIt = _mapRR.find( host );
-
-        if( mapIt != _mapRR.end() )
+        if( mapIt != _mapLB.end() )
         {
-            mapIt.disable();
+            mapIt->second.push( pConn );
+			return true;
         }
+		else
+		{
+			return false;
+		}
     }
 
-    void enableQueue( std::string host)
+    bool disableQueue( std::string host)
     {
         LockPolicy  scopelock(_mx);
 
-        typename MapRR::iterator mapIt = _mapRR.find( host );
+        typename MapLB::iterator mapIt = _mapLB.find( host );
 
-        if( mapIt != _mapRR.end() )
+        if( mapIt != _mapLB.end() )
+        {
+            mapIt->second.disable();
+			return true;
+        }
+		else
+		{
+			return false;
+		}
+    }
+
+    bool enableQueue( std::string host)
+    {
+        LockPolicy  scopelock(_mx);
+
+        typename MapLB::iterator mapIt = _mapLB.find( host );
+
+        if( mapIt != _mapLB.end() )
         {
             mapIt.enable();
+			return true;
         }
+		else
+		{
+			return false;
+		}
     }
 
     inline bool empty()
     {
         LockPolicy  scopelock(_mx);
 
-        for( typename MapRR::iterator it = _mapRR.begin(); it != _mapRR.end(); it++ )
+        for( typename MapLB::iterator it = _mapLB.begin(); it != _mapLB.end(); it++ )
         {
-            if( !it.empty() )
+            if( !it->second.empty() )
                 return false;
         }
 
         return true;
     }
 
+    void addQueue( std::string hostQueue )
+    {
+		LockPolicy  scopelock(_mx);
+		_mapLB[ hostQueue ]; // Add an empty queue to the map
+    }
 
+    void deleteQueue( std::string hostQueue )
+    {
+		LockPolicy  scopelock(_mx);
+		
+		ItLB it = _mapLB.find( hostQueue );
+		
+		if( it != _mapLB.end() )
+		{
+			ConnectionQueue &connQue = it->second;
+			
+			while( !connQue.empty() )
+			{
+				connType *pConn = connQue.popConnection();
+				
+				if( pConn != NULL )
+				{
+					pConn->close();
+					delete pConn;
+				}
+			}
+			
+			_mapLB.erase( it );
+		}
+    }
+
+    void start() 
+    { 
+        ThreadRunner< ConnectionLoadBalancer > threader( this, manager ); 
+        threader.run();
+    } 
+
+ private:
+
+    void manager()
+    {
+        while(true)
+        {    
+            // Scope Level Locking
+            {
+                LockPolicy scope( _mx );
+                connType* pConn = popConnection();
+            }
+
+            if( pConn != NULL )
+            {
+				bool alive = keepConnAlive( pConn );
+				
+				{   // Scope Locked
+					LockPolicy scope( _mx );
+
+					if( alive )
+						pushConnection( pConn );
+					else
+						pushRecycle( pConn );
+				}
+            }
+
+            ThreadRunner::sleep( 1000 );
+        }
+    }
 };
 
 
 
-template <class connType, class Lock, class LockPolicy > 
+template < class connType > 
 class ConnectionPool
 {
 	Lock _mx;
 	
-	ConnectionRoundRobin< connType, NoLock, NoLocking > _connections;
+	ConnectionLoadBalancer< connType > _favoredConns;
+	ConnectionLoadBalancer< connType > _otherConns;
 	
 	public:
 	
@@ -303,33 +389,33 @@ class ConnectionPool
 	void setConnectionsPerQueue( int connsPerQ )
 	{
 		_connections.connections_per_queue( connsPerQ );
+		_connections.connections_per_queue( connsPerQ );
 	}
 	
-	void start() 
-	{ 
-		ThreadRunner< ConnectionPool > threader( this, manager ); 
-		threader.run();
-	} 
-	
-	private:
-	
-	void manager()
+	void disableQueue( std::string hostQueue )
 	{
-		while(true)
-		{
-			// Scope Level Locking
-			{
-				LockPolicy scope( _mx );
-				_connections.maintain_connections();
-			}
-			
-			ThreadRunner::sleep( 100 );
-		}
+		_connections.disableQueue( hostQueue );
 	}
 	
+	void enableQueue( std::string hostQueue )
+	{
+		_connections.disableQueue( hostQueue );
+	}
+	
+	void addQueue( std::string hostQueue )
+	{
+		_connections.addQueue( hostQueue );
+	}
+	
+	void deleteQueue( std::string hostQueue )
+	{
+		_connections.deleteQueue( hostQueue );
+	}
+
 };
 
 
 #endif  // CONNECTIONPOOLING_H
+
 
 
