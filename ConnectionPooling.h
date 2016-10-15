@@ -16,15 +16,25 @@ Description: A generic collection of managed
 
 
 template < mutexType >
-class NoLocking
+class Lock
 {
+	mutexType _mx;
+	public:
+	void lock(){ _mx.lock(); }
+	void unlock(){ _mx.unlock(); }
+};
+
+template
+class NoLock
+{
+	public:
 	void lock(){}
 	void unlock(){}
 };
 
 
 template < mutexType >
-class ScopeLevelLockingPolicy
+class ScopeLevelLocking
 {
 	mutexType &_rMutex;
 	bool _bDetached;
@@ -49,15 +59,15 @@ class ScopeLevelLockingPolicy
 };
 
 template < mutexType >
-class NoLockingPolicy
+class NoLocking
 {
 	mutexType &_rMutex;
-	bool _bDetached;
+
 	public:
 
-	ScopeMutex( mutexType & mutex ) {}
+	NoLocking( mutexType & mutex ) {}
 
-	~ScopeMutex() {}
+	~NoLocking() {}
 	
 	mutexType & detachMutex( bool bSet ) {}
 };
@@ -87,12 +97,18 @@ class ThisThreader : public WorkerThread
     {
         this->start( bDetach );
     }
+	
+	static void sleep( int ms )
+	{
+		WorkerThread::sleep();
+	}
 };
 
 
 
 
-template <class connType, class Lock, class LockPolicy > class ConnectionQueue
+template <class connType, class Lock, class LockPolicy > 
+class ConnectionQueue
 {
     std::queue< connType* > _Q;
     Lock _mx;
@@ -101,8 +117,7 @@ template <class connType, class Lock, class LockPolicy > class ConnectionQueue
     public:
 
     ConnectionQueue( bool enabled = false )
-        : _mx( PTHREAD_MUTEX_RECURSIVE ),
-          _enable_state( enabled )  {}
+        : _enable_state( enabled )  {}
 
     void pushConnection( connType* pConn )
     {
@@ -147,13 +162,13 @@ template <class connType, class Lock, class LockPolicy > class ConnectionQueue
 
 
 
-template <class connType, class Lock, class LockPolicy > class ConnectionRoundRobin
+template <class connType, class Lock, class LockPolicy > 
+class ConnectionRoundRobin
 {
-
     Lock _mx;
 
     // Host name based lookup connection pool map typedef
-    typedef std::map< std::string, ConnectionQueue< connType, NoLocking, NoLockingPolicy > > MapRR;
+    typedef std::map< std::string, ConnectionQueue< connType, NoLock, NoLocking > > MapRR;
     typedef MapRR::iterator ItRR;
 
     MapRR _mapRR;
@@ -161,12 +176,12 @@ template <class connType, class Lock, class LockPolicy > class ConnectionRoundRo
 
 public:
 
-    RoundRobin()
+    ConnectionRoundRobin()
     {
         _itRR = _mapRR.begin();
     }
 
-    ~RoundRobin()
+    ~ConnectionRoundRobin()
     {
     }
 
@@ -228,7 +243,7 @@ public:
     {
         LockPolicy  scopelock(_mx);
 
-        m_mapRRset[pConn->host()].push( pConn );
+        _mapRR[pConn->host()].push( pConn );
     }
 
     void disableQueue( std::string host)
@@ -273,18 +288,48 @@ public:
 
 
 
-
-
-// ----------------------------------
-
-
-
-
 template <class connType, class Lock, class LockPolicy > 
 class ConnectionPool
 {
+	Lock _mx;
+	
+	ConnectionRoundRobin< connType, NoLock, NoLocking > _connections;
+	
+	public:
+	
+	ConnectionPool() {}
+	~ConnectionPool() {}
+	
+	void setConnectionsPerQueue( int connsPerQ )
+	{
+		_connections.connections_per_queue( connsPerQ );
+	}
+	
+	void start() 
+	{ 
+		ThreadRunner< ConnectionPool > threader( this, manager ); 
+		threader.run();
+	} 
+	
+	private:
+	
+	void manager()
+	{
+		while(true)
+		{
+			// Scope Level Locking
+			{
+				LockPolicy scope( _mx );
+				_connections.maintain_connections();
+			}
+			
+			ThreadRunner::sleep( 100 );
+		}
+	}
 	
 };
 
 
 #endif  // CONNECTIONPOOLING_H
+
+
