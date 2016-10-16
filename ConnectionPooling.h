@@ -15,7 +15,7 @@ Description: A generic collection of managed
 
 
 
-template < mutexType >
+template < class mutexType >
 class Lock
 {
 	mutexType _mx;
@@ -24,7 +24,7 @@ class Lock
 	void unlock(){ _mx.unlock(); }
 };
 
-template
+template < class whatever >
 class NoLock
 {
 	public:
@@ -33,7 +33,7 @@ class NoLock
 };
 
 
-template < mutexType >
+template < class mutexType >
 class ScopeLevelLocking
 {
 	mutexType &_rMutex;
@@ -58,14 +58,12 @@ class ScopeLevelLocking
 	}
 };
 
-template < mutexType >
+template < class mutexType >
 class NoLocking
 {
-	mutexType &_rMutex;
-
 	public:
 
-	NoLocking( mutexType & mutex ) {}
+	NoLocking( mutexType mutex ) {}
 
 	~NoLocking() {}
 	
@@ -75,8 +73,8 @@ class NoLocking
 
 
 // This template makes a class method threadable
-template < class Type >
-class ThisThreader : public WorkerThread
+template < class Type, class TaskThreadRunner >
+class ThisThreader : public TaskThreadRunner
 {
     Type  *_obj;
     typedef void(Type::* Method)();
@@ -89,7 +87,7 @@ class ThisThreader : public WorkerThread
 
     public:
 
-    ThisRunner(Type *obj, Method method )
+    ThisThreader(Type *obj, Method method )
         : _obj( obj ), _method( method )
     { }
 
@@ -100,18 +98,18 @@ class ThisThreader : public WorkerThread
 	
 	static void sleep( int ms )
 	{
-		WorkerThread::sleep();
+		TaskThreadRunner::sleep();
 	}
 };
 
 
 
 
-template <class connType, class Lock, class LockPolicy > 
+template <class connType, class Locker, class LockPolicy > 
 class ConnectionQueue
 {
     std::queue< connType* > _Q;
-    Lock _mx;
+    Locker _mx;
     bool _enable_state;
 
     public:
@@ -145,6 +143,12 @@ class ConnectionQueue
         return _Q.empty();
     }
 
+    bool size()
+    {
+        LockPolicy  scopelock(_mx);
+        return _Q.size();
+    }
+
     bool enabled()
     {
         return _enable_state;
@@ -162,14 +166,16 @@ class ConnectionQueue
 
 
 
-template < class connType > 
+template < class connType, class Locker, class LockPolicy, class TaskThreadRunnner > 
 class ConnectionLoadBalancer
 {
-    Lock _mx;
+    Locker _mx;
+
+    typedef ConnectionQueue< connType, NoLock< bool >, NoLocking< NoLock< bool > > > ConnQue;
 
     // Host name based lookup connection pool map typedef
-    typedef std::map< std::string, ConnectionQueue< connType, NoLock, NoLocking > > MapLB;
-    typedef MapLB::iterator ItLB;
+    typedef std::map< std::string, ConnQue > MapLB;
+    typedef typename MapLB::iterator ItLB;
 
     MapLB _mapLB;
     ItLB  _itLB;
@@ -208,12 +214,12 @@ public:
 
         // Round-robin here
         if( ++_itLB == _mapLB.end() )
-            _itLB = _mapLBset.begin();
+            _itLB = _mapLB.begin();
 
         // if the queue is empty go to the next available queue with connections
         if( !_itLB->second.empty() && _itLB->second.enabled() )
         {
-            pConn = _itLB->popConnection();
+            pConn = _itLB->second.popConnection();
         }
 
         if( pConn == NULL )
@@ -243,11 +249,11 @@ public:
     {
         LockPolicy  scopelock(_mx);
 
-        typename MapLB::iterator mapIt = _mapLB.find( host );
+        typename MapLB::iterator mapIt = _mapLB.find( pConn->host() );
 
         if( mapIt != _mapLB.end() )
         {
-            mapIt->second.push( pConn );
+            mapIt->second.pushConnection( pConn );
 			return true;
         }
 		else
@@ -317,7 +323,7 @@ public:
 		
 		if( it != _mapLB.end() )
 		{
-			ConnectionQueue &connQue = it->second;
+			ConnQue &connQue = it->second;
 			
 			while( !connQue.empty() )
 			{
@@ -336,7 +342,7 @@ public:
 
     void start() 
     { 
-        ThreadRunner< ConnectionLoadBalancer > threader( this, manager ); 
+        ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner > threader( this, manager ); 
         threader.run();
     } 
 
@@ -345,11 +351,14 @@ public:
     void manager()
     {
         while(true)
-        {    
+        {   
+ 
+            connType* pConn= NULL;
+
             // Scope Level Locking
             {
                 LockPolicy scope( _mx );
-                connType* pConn = popConnection();
+                pConn = popConnection();
             }
 
             if( pConn != NULL )
@@ -366,56 +375,76 @@ public:
 				}
             }
 
-            ThreadRunner::sleep( 1000 );
+            ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 1000 );
         }
     }
 };
 
 
 
-template < class connType > 
+template < class connType, class mutexType, class TaskThreadRunnner > 
 class ConnectionPool
 {
-	Lock _mx;
+	Lock< mutexType > _mx;
 	
-	ConnectionLoadBalancer< connType > _favoredConns;
-	ConnectionLoadBalancer< connType > _otherConns;
+	typedef ConnectionLoadBalancer< connType, Lock< mutexType >, ScopeLevelLocking< Lock< mutexType > >, TaskThreadRunnner > ConnLB;
+
+	ConnLB _favoredConns;
+	ConnLB _otherConns;
 	
 	public:
 	
-	ConnectionPool() {}
-	~ConnectionPool() {}
-	
-	void setConnectionsPerQueue( int connsPerQ )
+	ConnectionPool() { }
+
+	~ConnectionPool() { }
+		
+	connType* popConnection()
 	{
-		_connections.connections_per_queue( connsPerQ );
-		_connections.connections_per_queue( connsPerQ );
+		connType *conn = NULL;
+
+		if( ( conn = _favoredConns.popConnection() ) == NULL )
+			conn = _otherConns.popConnection();
+
+		return conn;
+	}
+	
+	void pushConnection( connType* conn )
+	{
+		if( ( _favoredConns.pushConnection(conn) ) == NULL )
+			_otherConns.pushConnection(conn);
 	}
 	
 	void disableQueue( std::string hostQueue )
 	{
-		_connections.disableQueue( hostQueue );
+		if( !_favoredConns.disableQueue( hostQueue ) )
+			_otherConns.disableQueue( hostQueue );
 	}
 	
 	void enableQueue( std::string hostQueue )
 	{
-		_connections.disableQueue( hostQueue );
+		if( !_favoredConns.enableQueue( hostQueue ) )
+			_otherConns.enableQueue( hostQueue );
 	}
 	
-	void addQueue( std::string hostQueue )
+	void addFavoredQueue( std::string hostQueue, int Count )
 	{
-		_connections.addQueue( hostQueue );
+		_favoredConns.addQueue( hostQueue, Count );
+	}
+	
+	void addOtherQueue( std::string hostQueue, int Count )
+	{
+		_otherConns.addQueue( hostQueue, Count );
 	}
 	
 	void deleteQueue( std::string hostQueue )
 	{
-		_connections.deleteQueue( hostQueue );
+		if( !_favoredConns.deleteQueue( hostQueue ) )
+			_otherConns.deleteQueue( hostQueue );
 	}
 
 };
 
 
 #endif  // CONNECTIONPOOLING_H
-
 
 
