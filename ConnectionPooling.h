@@ -356,6 +356,8 @@ public:
 			
 			_mapLB.erase( it );
 
+			_itLB = _mapLB.begin(); // reset the rotor
+			
 			return true;
 		}
 
@@ -390,9 +392,9 @@ public:
 			LockPolicy scope( _mx );
 
 			if( alive_time < 0.0 )
-				pushConnection( pConn, alive_time );
-			else
 				pushRecycle( pConn );
+			else
+				pushConnection( pConn, alive_time );
 		}
             }
 
@@ -429,7 +431,7 @@ class ConnectionPool
 		return conn;
 	}
 	
-	void pushConnection( connType* conn )
+	bool pushConnection( connType* conn )
 	{
 		if( !_favoredConns.pushConnection(conn) )
 		{
@@ -437,8 +439,11 @@ class ConnectionPool
 			{
 				conn->close();
 				delete conn;
+				return false;
 			}
 		}
+		
+		return true;
 	}
 	
 	void disableQueue( std::string hostQueue )
@@ -480,5 +485,4 @@ class ConnectionPool
 
 
 #endif  // CONNECTIONPOOLING_H
-
 
