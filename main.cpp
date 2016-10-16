@@ -115,16 +115,22 @@ class Worker : public threadable_base_class
 			// do the work
 		//	std::cout << _name << " is going to " << todo << " right now" << std::endl << std::flush;
 
-			fakeSocket* pSock = g_ConnPool.popConnection();			
+			fakeSocket* pSock = g_ConnPool.popConnection();
+			if( pSock != NULL )	
+			{
+				printf("%s using %s : 0x%08x\n", _name.c_str(), pSock->host().c_str(), pSock );
 
-			printf("%s using %s : 0x%08x\n", _name.c_str(), pSock->host().c_str(), pSock );
 
-
-			// Take a break
-			std::this_thread::sleep_for( std::chrono::milliseconds(2000) );
+				// Take a break
+				std::this_thread::sleep_for( std::chrono::milliseconds(2000) );
 				
-			g_ConnPool.pushConnection( pSock );
-			printf("%s done with %s : 0x%08x\n", _name.c_str(), pSock->host().c_str(), pSock );
+				g_ConnPool.pushConnection( pSock );
+				printf("%s done with %s : 0x%08x\n", _name.c_str(), pSock->host().c_str(), pSock );
+			}
+			else
+			{
+				printf("%s - no connection obtained\n", _name.c_str() );
+			}
 		}
 	}
 	
@@ -157,14 +163,46 @@ int main( int argc, char **argv )
 			"define foo", 
 			"learn C++" };
 	
-	// Hire Workers
+	std::vector<std::string> vec_good_addrs{ 
+			"192.168.1.111", 
+			"192.168.1.112", 
+			"192.168.1.113", 
+			"192.168.1.114" };
+	
+	std::vector<std::string> vec_fair_addrs{ 
+			"192.168.2.111", 
+			"192.168.2.112", 
+			"192.168.2.113", 
+			"192.168.2.114" };
+	
+	// Start Workers
 	for( auto worker_name : vec_workers_names )
 	{
 		Worker *pWrkr = new Worker( worker_name );
 		pWrkr->detach();
 	}
 
-	// Deligate Work
+	// create good connection queues
+	for( auto good : vec_good_addrs )
+	{
+		g_ConnPool.addFavoredQueue( good );
+
+		for( int i=0; i < 5; i++ )
+			g_ConnPool.pushConnection( new fakeSocket( good ) );
+
+		g_ConnPool.enableQueue( good );
+	}
+
+	for( auto fair : vec_fair_addrs )
+	{
+		g_ConnPool.addOtherQueue( fair );
+
+		for( int i=0; i < 5; i++ )
+			g_ConnPool.pushConnection( new fakeSocket( fair ) );
+
+		g_ConnPool.enableQueue( fair );
+	}
+
 	while(true)
 	{
 		for( auto work_task : vec_work_tasks )
@@ -175,5 +213,6 @@ int main( int argc, char **argv )
 			cond.notify_one();
 		}
 	}
+
 }
 

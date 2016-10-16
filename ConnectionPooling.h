@@ -287,7 +287,7 @@ public:
 
         if( mapIt != _mapLB.end() )
         {
-            mapIt.enable();
+            mapIt->second.enable();
 			return true;
         }
 		else
@@ -426,14 +426,14 @@ class ConnectionPool
 			_otherConns.enableQueue( hostQueue );
 	}
 	
-	void addFavoredQueue( std::string hostQueue, int Count )
+	void addFavoredQueue( std::string hostQueue )
 	{
-		_favoredConns.addQueue( hostQueue, Count );
+		_favoredConns.addQueue( hostQueue );
 	}
 	
-	void addOtherQueue( std::string hostQueue, int Count )
+	void addOtherQueue( std::string hostQueue )
 	{
-		_otherConns.addQueue( hostQueue, Count );
+		_otherConns.addQueue( hostQueue );
 	}
 	
 	void deleteQueue( std::string hostQueue )
