@@ -93,12 +93,12 @@ class ThisThreader : public TaskThreadRunner
 
     void run( bool bDetach = true )
     {
-        this->start( bDetach );
+        this->start( );
     }
 	
 	static void sleep( int ms )
 	{
-		TaskThreadRunner::sleep();
+		TaskThreadRunner::sleep(ms);
 	}
 };
 
@@ -111,16 +111,21 @@ class ConnectionQueue
     std::queue< connType* > _Q;
     Locker _mx;
     bool _enable_state;
+    double _time;
 
     public:
 
     ConnectionQueue( bool enabled = false )
-        : _enable_state( enabled )  {}
+        : _enable_state( enabled ), _time(0.0)  {}
 
-    void pushConnection( connType* pConn )
+    void pushConnection( connType* pConn, double alive_time = 0.0 )
     {
         LockPolicy  scopelock(_mx);
         _Q.push( pConn );
+
+	if( alive_time > 0.0 )
+		_time = alive_time;
+
     }
 
     connType* popConnection()
@@ -162,6 +167,11 @@ class ConnectionQueue
     void enable()  { _enable_state = true; }
     void disable() { _enable_state = false; }
 
+    double alive_time()
+    {
+        return _time;
+    }
+
 };
 
 
@@ -173,6 +183,8 @@ class ConnectionLoadBalancer
 
     typedef ConnectionQueue< connType, NoLock< bool >, NoLocking< NoLock< bool > > > ConnQue;
 
+    ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner > threader; 
+
     // Host name based lookup connection pool map typedef
     typedef std::map< std::string, ConnQue > MapLB;
     typedef typename MapLB::iterator ItLB;
@@ -182,7 +194,8 @@ class ConnectionLoadBalancer
 
 public:
 
-    ConnectionLoadBalancer()
+    ConnectionLoadBalancer() 
+	: threader( this, &ConnectionLoadBalancer::manager )
     {
         _itLB = _mapLB.begin();
     }
@@ -245,7 +258,7 @@ public:
     }
 
     // uses host value to place in proper map
-    bool pushConnection(connType* pConn)
+    bool pushConnection(connType* pConn, double alive_time = 0.0 )
     {
         LockPolicy  scopelock(_mx);
 
@@ -253,13 +266,18 @@ public:
 
         if( mapIt != _mapLB.end() )
         {
-            mapIt->second.pushConnection( pConn );
+            mapIt->second.pushConnection( pConn, alive_time );
 			return true;
         }
 		else
 		{
 			return false;
 		}
+    }
+
+    bool pushRecycle(connType* pConn )
+    {
+        return pushConnection( pConn );
     }
 
     bool disableQueue( std::string host)
@@ -346,7 +364,6 @@ public:
 
     void start() 
     { 
-        ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner > threader( this, manager ); 
         threader.run();
     } 
 
@@ -367,16 +384,16 @@ public:
 
             if( pConn != NULL )
             {
-				bool alive = keepConnAlive( pConn );
-				
-				{   // Scope Locked
-					LockPolicy scope( _mx );
+		double alive_time = keepConnAlive<connType>( pConn );
+		
+		{   // Scope Locked
+			LockPolicy scope( _mx );
 
-					if( alive )
-						pushConnection( pConn );
-					else
-						pushRecycle( pConn );
-				}
+			if( alive_time < 0.0 )
+				pushConnection( pConn, alive_time );
+			else
+				pushRecycle( pConn );
+		}
             }
 
             ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 1000 );
@@ -450,6 +467,13 @@ class ConnectionPool
 	{
 		if( !_favoredConns.deleteQueue( hostQueue ) )
 			_otherConns.deleteQueue( hostQueue );
+	}
+
+	
+	void start()
+	{
+		_favoredConns.start();
+		_otherConns.start();
 	}
 
 };

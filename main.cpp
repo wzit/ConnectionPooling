@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 #include <queue>
-#include "ConnectionPooling.h"
+
 
 using namespace std;
 
@@ -53,6 +53,18 @@ public:
 
 
 
+template<typename fakeSocket> double keepConnAlive( fakeSocket* pConn )
+{
+	std::this_thread::sleep_for( std::chrono::milliseconds( 7 ) );
+
+	return 0.007;
+}
+
+
+
+#include "ConnectionPooling.h"
+
+
 // "Threadable" base class
 class threadable_base_class
 {
@@ -61,7 +73,7 @@ public:
 	threadable_base_class() : _thd(0) 
 	{ _thd = new std::thread(threadable_base_class::work, this); }
 
-	void run() { detach(); }
+	void start() { detach(); }
 
 	void detach() { if(_thd) _thd->detach(); }
 	void join()   { if(_thd) _thd->join();   }
@@ -85,9 +97,7 @@ protected:
 
 
 
-ConnectionPool< fakeSocket, std::mutex, threadable_base_class > g_ConnPool;
-
-
+ConnectionPool< fakeSocket, std::recursive_mutex, threadable_base_class > g_ConnPool;
 
 
 // Worker class
@@ -188,7 +198,11 @@ int main( int argc, char **argv )
 			//"192.168.2.112", 
 			//"192.168.2.113", 
 			"192.168.2.114" };
+
 	
+	g_ConnPool.start();
+
+
 	// Start Workers
 	for( auto worker_name : vec_workers_names )
 	{
