@@ -122,7 +122,7 @@ class Worker : public threadable_base_class
 
 
 				// Take a break
-				std::this_thread::sleep_for( std::chrono::milliseconds(2000) );
+				std::this_thread::sleep_for( std::chrono::milliseconds(300) );
 				
 				g_ConnPool.pushConnection( pSock );
 				printf("%s done with %s : 0x%08x\n", _name.c_str(), pSock->host().c_str(), pSock );
@@ -146,7 +146,21 @@ class Worker : public threadable_base_class
 int main( int argc, char **argv )
 {
 	// Create Workers
-	std::vector<std::string> vec_workers_names{ "Sam", "Tom", "Jackie", "Lou", "Bruce" };
+	std::vector<std::string> vec_workers_names{ 
+			"Fred", 
+			"Jerry", 
+			"Eugene", 
+			"Sam", 
+			"Tom", 
+			"Billy", 
+			"Gene", 
+			"Mike", 
+			"Jackie", 
+			"Alvin", 
+			"Simon", 
+			"Theodore", 
+			"Lou", 
+			"Bruce" };
 	
 	// Establish work to be done
 	std::vector<std::string> vec_work_tasks{ 
@@ -165,14 +179,14 @@ int main( int argc, char **argv )
 	
 	std::vector<std::string> vec_good_addrs{ 
 			"192.168.1.111", 
-			"192.168.1.112", 
-			"192.168.1.113", 
+			//"192.168.1.112", 
+			//"192.168.1.113", 
 			"192.168.1.114" };
 	
 	std::vector<std::string> vec_fair_addrs{ 
 			"192.168.2.111", 
-			"192.168.2.112", 
-			"192.168.2.113", 
+			//"192.168.2.112", 
+			//"192.168.2.113", 
 			"192.168.2.114" };
 	
 	// Start Workers
@@ -187,7 +201,7 @@ int main( int argc, char **argv )
 	{
 		g_ConnPool.addFavoredQueue( good );
 
-		for( int i=0; i < 5; i++ )
+		for( int i=0; i < 3; i++ )
 			g_ConnPool.pushConnection( new fakeSocket( good ) );
 
 		g_ConnPool.enableQueue( good );
@@ -197,17 +211,40 @@ int main( int argc, char **argv )
 	{
 		g_ConnPool.addOtherQueue( fair );
 
-		for( int i=0; i < 5; i++ )
+		for( int i=0; i < 3; i++ )
 			g_ConnPool.pushConnection( new fakeSocket( fair ) );
 
 		g_ConnPool.enableQueue( fair );
 	}
 
+
+	std::thread([&]{
+	
+		printf("*******************************************************\n" );
+		
+		for( auto good : vec_good_addrs )
+		{
+			std::this_thread::sleep_for( std::chrono::milliseconds(5000) );
+			printf("************************* disbaled %s ******************************\n", good.c_str() );
+			g_ConnPool.disableQueue( good );
+		}
+			
+		for( auto good : vec_good_addrs )
+		{
+			std::this_thread::sleep_for( std::chrono::milliseconds(5000) );
+			printf("************************* disbaled %s ******************************\n", good.c_str() );
+			g_ConnPool.deleteQueue( good );
+		}
+			
+
+	}).detach();
+
+
 	while(true)
 	{
 		for( auto work_task : vec_work_tasks )
 		{
-			std::this_thread::sleep_for( std::chrono::milliseconds(500) );
+			std::this_thread::sleep_for( std::chrono::milliseconds(20) );
 			std::lock_guard<std::mutex> lock(mx);
 			work_queue.push(work_task);
 			cond.notify_one();

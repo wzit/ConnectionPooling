@@ -217,7 +217,7 @@ public:
             _itLB = _mapLB.begin();
 
         // if the queue is empty go to the next available queue with connections
-        if( !_itLB->second.empty() && _itLB->second.enabled() )
+        if( ( !_itLB->second.empty() ) && _itLB->second.enabled() )
         {
             pConn = _itLB->second.popConnection();
         }
@@ -315,7 +315,7 @@ public:
 		_mapLB[ hostQueue ]; // Add an empty queue to the map
     }
 
-    void deleteQueue( std::string hostQueue )
+    bool deleteQueue( std::string hostQueue )
     {
 		LockPolicy  scopelock(_mx);
 		
@@ -337,7 +337,11 @@ public:
 			}
 			
 			_mapLB.erase( it );
+
+			return true;
 		}
+
+		return false;
     }
 
     void start() 
@@ -410,8 +414,14 @@ class ConnectionPool
 	
 	void pushConnection( connType* conn )
 	{
-		if( ( _favoredConns.pushConnection(conn) ) == NULL )
-			_otherConns.pushConnection(conn);
+		if( !_favoredConns.pushConnection(conn) )
+		{
+			if( !_otherConns.pushConnection(conn) )
+			{
+				conn->close();
+				delete conn;
+			}
+		}
 	}
 	
 	void disableQueue( std::string hostQueue )
