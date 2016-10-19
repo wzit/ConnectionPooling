@@ -108,7 +108,7 @@ protected:
 
 
 
-ConnectionPool< fakeSocket, std::recursive_mutex, threadable_base_class > g_ConnPool;
+ConnectionWaitPool< fakeSocket, std::recursive_mutex, threadable_base_class > g_ConnPool;
 
 
 // Worker class
@@ -136,14 +136,14 @@ class Worker : public threadable_base_class
 			// do the work
 		//	std::cout << _name << " is going to " << todo << " right now" << std::endl << std::flush;
 
-			fakeSocket* pSock = g_ConnPool.popConnection();
+			fakeSocket* pSock = g_ConnPool.popConnection(100);
 			if( pSock != NULL )	
 			{
 				printf("%s using %s : 0x%08x\n", _name.c_str(), pSock->host().c_str(), pSock );
 
 
 				// Take a break
-				std::this_thread::sleep_for( std::chrono::milliseconds(300) );
+				std::this_thread::sleep_for( std::chrono::milliseconds(50) );
 				
 				g_ConnPool.pushConnection( pSock );
 				printf("%s done with %s : 0x%08x\n", _name.c_str(), pSock->host().c_str(), pSock );
@@ -250,14 +250,14 @@ int main( int argc, char **argv )
 		for( auto good : vec_good_addrs )
 		{
 			std::this_thread::sleep_for( std::chrono::milliseconds(5000) );
-			printf("************************* disbaled %s ******************************\n", good.c_str() );
+			printf("**************** disbaled %s ***************\n", good.c_str() );
 			g_ConnPool.disableQueue( good );
 		}
 			
 		for( auto good : vec_good_addrs )
 		{
 			std::this_thread::sleep_for( std::chrono::milliseconds(5000) );
-			printf("************************* disbaled %s ******************************\n", good.c_str() );
+			printf("**************** deleted %s ***************\n", good.c_str() );
 			g_ConnPool.deleteQueue( good );
 		}
 			

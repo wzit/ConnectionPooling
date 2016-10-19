@@ -220,8 +220,8 @@ public:
         connType* pConn = NULL;
         LockPolicy  scopelock( _mx );
 
-        //if( _mapLB.empty() ) // prevent a nasty loop when there are not Remotes
-        //    return NULL;
+        if( _mapLB.empty() ) // prevent a runaway iterator
+            return NULL;
 
         // Direct connection retrieval for closing conns in task thread : ?????
         if( szHost != NULL )
@@ -480,26 +480,29 @@ public:
                pConn = _recycling_bin.popConnection();
             } 
              
-            if( recycleConnection<connType>( pConn ) )
+            if( pConn != NULL )
             {
-                double alive_time = keepConnAlive<connType>( pConn );
-                {
-                    LockPolicy scope( _mx );
-                        
-                    if( alive_time < 0.0 )
-                            pushRecycle( pConn );
-                    else
-                            pushConnection( pConn, alive_time );
-                }
+		    if( recycleConnection<connType>( pConn ) )
+		    {
+		        double alive_time = keepConnAlive<connType>( pConn );
+		        {
+		            LockPolicy scope( _mx );
+		                
+		            if( alive_time < 0.0 )
+		                    pushRecycle( pConn );
+		            else
+		                    pushConnection( pConn, alive_time );
+		        }
 
-                ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 200 );
-             
-                continue;
-            }
-            else
-            {
-                LockPolicy scope( _mx );
-                _recycling_bin.pushConnection( pConn ); 
+		        ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 200 );
+		     
+		        continue;
+		    }
+		    else
+		    {
+		        LockPolicy scope( _mx );
+		        _recycling_bin.pushConnection( pConn ); 
+		    }
             }
 
             ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 1000 );
@@ -540,12 +543,14 @@ class ConnectionPool
 {
 	Lock< mutexType > _mx;
 	
+protected:
+
 	typedef ConnectionLoadBalancer< connType, Lock< mutexType >, ScopeLevelLocking< Lock< mutexType > >, TaskThreadRunnner > ConnLB;
 
 	ConnLB _favoredConns;
 	ConnLB _otherConns;
 	
-	public:
+public:
 	
 	ConnectionPool() { }
 
@@ -614,8 +619,8 @@ class ConnectionPool
         {
                 string report;
 		
-		report += "favored{" + _favoredConns.queueStatusReport() + "};";
-		report += "other{" + _otherConns.queueStatusReport() + "};";
+		        report += "favored{" + _favoredConns.queueStatusReport() + "};";
+		        report += "other{" + _otherConns.queueStatusReport() + "};";
 
                 return report;
         }
@@ -624,10 +629,45 @@ class ConnectionPool
 	{
 		_favoredConns.start();
 		_otherConns.start();
+		//TaskThreadRunnner::sleep( 500 );
 	}
 
 };
 
+// if C++11 
+#if __cplusplus > 199711L
+
+template < class connType, class mutexType, class TaskThreadRunnner > 
+class ConnectionWaitPool : public ConnectionPool< connType, mutexType, TaskThreadRunnner >
+{
+    std::mutex _cond_mx;                   // mutex
+    std::condition_variable _cond;         // conditional variable
+public:
+
+    
+    connType* popConnection( int ms )
+    {    
+        std::unique_lock<std::mutex> cond_lock(_cond_mx);
+
+        // Wait for work to do
+        _cond.wait_for( cond_lock, std::chrono::milliseconds(ms), [&]{ return !(this->_favoredConns.empty() ); } );
+
+        return ConnectionPool< connType, mutexType, TaskThreadRunnner >::popConnection();
+    }
+
+    bool pushConnection( connType* conn )
+    {
+        if( ConnectionPool< connType, mutexType, TaskThreadRunnner >::pushConnection( conn ) )
+        {
+            _cond.notify_all();
+            return true;
+        }
+        return false;
+    }
+
+};
+
+#endif // end C++11
 
 #endif  // CONNECTIONPOOLING_H
 
