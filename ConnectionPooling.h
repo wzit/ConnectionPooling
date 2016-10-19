@@ -93,13 +93,13 @@ class ThisThreader : public TaskThreadRunner
 
     void run( bool bDetach = true )
     {
-        this->start( bDetach );
+        this->start( );
     }
 	
-	static void sleep( int ms )
-	{
-		TaskThreadRunner::sleep();
-	}
+    static void sleep( int ms )
+    {
+        TaskThreadRunner::sleep(ms);
+    }
 };
 
 
@@ -111,19 +111,24 @@ class ConnectionQueue
     std::queue< connType* > _Q;
     Locker _mx;
     bool _enable_state;
+    double _time;
 
     public:
 
-    ConnectionQueue( bool enabled = false )
-        : _enable_state( enabled )  {}
+    ConnectionQueue( bool enabled = true )
+        : _enable_state( enabled ), _time(0.0)  {}
 
-    void pushConnection( connType* pConn )
+    inline void pushConnection( connType* pConn, double alive_time = 0.0 )
     {
         LockPolicy  scopelock(_mx);
         _Q.push( pConn );
+
+	if( alive_time > 0.0 )
+		_time = alive_time;
+
     }
 
-    connType* popConnection()
+    inline connType* popConnection()
     {
         connType *pConn = NULL;
         LockPolicy  scopelock(_mx);
@@ -143,7 +148,7 @@ class ConnectionQueue
         return _Q.empty();
     }
 
-    bool size()
+    int size()
     {
         LockPolicy  scopelock(_mx);
         return _Q.size();
@@ -162,6 +167,11 @@ class ConnectionQueue
     void enable()  { _enable_state = true; }
     void disable() { _enable_state = false; }
 
+    double alive_time()
+    {
+        return _time;
+    }
+
 };
 
 
@@ -171,18 +181,32 @@ class ConnectionLoadBalancer
 {
     Locker _mx;
 
+    // No locking policies requested here
     typedef ConnectionQueue< connType, NoLock< bool >, NoLocking< NoLock< bool > > > ConnQue;
+
+    // Locking requested policies here
+    // typedef ConnectionQueue< connType, Lock< mutexType >, ScopeLevelLocking< Lock< mutexType > > > ConnQue;
+
+
+    ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner > 
+        keepalive_threader, recycler_threader, disabler_threader; 
 
     // Host name based lookup connection pool map typedef
     typedef std::map< std::string, ConnQue > MapLB;
     typedef typename MapLB::iterator ItLB;
+    
+    ConnQue _recycling_bin;
+    ConnQue _disable_bin;
 
     MapLB _mapLB;
     ItLB  _itLB;
 
 public:
 
-    ConnectionLoadBalancer()
+    ConnectionLoadBalancer() 
+	: keepalive_threader( this, &ConnectionLoadBalancer::keepalive )
+        , recycler_threader( this, &ConnectionLoadBalancer::recycler )
+        , disabler_threader( this, &ConnectionLoadBalancer::disabler )
     {
         _itLB = _mapLB.begin();
     }
@@ -191,13 +215,13 @@ public:
     {
     }
 
-    connType* popConnection(const char* szHost = NULL)
+    inline connType* popConnection(const char* szHost = NULL)
     {
         connType* pConn = NULL;
         LockPolicy  scopelock( _mx );
 
-        if( _mapLB.empty() ) // prevent a nasty loop when there are not Remotes
-            return NULL;
+        //if( _mapLB.empty() ) // prevent a nasty loop when there are not Remotes
+        //    return NULL;
 
         // Direct connection retrieval for closing conns in task thread : ?????
         if( szHost != NULL )
@@ -245,7 +269,7 @@ public:
     }
 
     // uses host value to place in proper map
-    bool pushConnection(connType* pConn)
+    inline bool pushConnection(connType* pConn, double alive_time = 0.0 )
     {
         LockPolicy  scopelock(_mx);
 
@@ -253,13 +277,24 @@ public:
 
         if( mapIt != _mapLB.end() )
         {
-            mapIt->second.pushConnection( pConn );
+            if( mapIt->second.disabled() )
+            {
+                alive_time = 0.0;
+                closeConnection<connType>( pConn );
+            }
+            mapIt->second.pushConnection( pConn, alive_time );
 			return true;
         }
-		else
-		{
-			return false;
-		}
+	else
+	{
+            return false;
+	}
+    }
+
+    void pushRecycle(connType* pConn )
+    {
+        LockPolicy  scopelock(_mx);
+        _recycling_bin.pushConnection( pConn );
     }
 
     bool disableQueue( std::string host)
@@ -271,12 +306,19 @@ public:
         if( mapIt != _mapLB.end() )
         {
             mapIt->second.disable();
-			return true;
+ 
+            connType *pConn;
+
+            // Push these into the recycle bin to be disconnected reinserted
+            while( ( pConn = mapIt->second.popConnection() ) != NULL )
+               pushRecycle( pConn );       
+ 
+            return true;
         }
-		else
-		{
-			return false;
-		}
+	else
+	{
+		return false;
+	}
     }
 
     bool enableQueue( std::string host)
@@ -288,12 +330,52 @@ public:
         if( mapIt != _mapLB.end() )
         {
             mapIt->second.enable();
-			return true;
+
+            // Push these into the recycle bin to be disconnected reinserted
+            connType *pConn;
+            while( ( pConn = mapIt->second.popConnection() ) != NULL )
+               pushRecycle( pConn );
+
+            return true;
         }
-		else
-		{
-			return false;
-		}
+	else
+	{
+		return false;
+	}
+    }
+
+    void enableAll()
+    {
+	LockPolicy  scopelock(_mx);
+
+	typename MapLB::iterator mapIt = _mapLB.begin();
+
+	for( ; mapIt != _mapLB.end(); mapIt++ )
+		mapIt->second.enable();
+    }
+
+    string queueStatusReport()
+    {
+        LockPolicy  scopelock(_mx);
+
+        string report;
+
+        char buf[255];
+
+        typename MapLB::iterator mapIt = _mapLB.begin();
+
+        for( ; mapIt != _mapLB.end(); mapIt++ )
+        {
+                if( !report.empty() )
+                   report += "|";
+		report += mapIt->first;
+                report += ":";
+                report += mapIt->second.enabled() ? "enabled" : "disabled";
+                sprintf( buf, ":%d:%0.3f", mapIt->second.size(), mapIt->second.alive_time() );
+                report += buf;
+        }
+ 
+        return report;
     }
 
     inline bool empty()
@@ -315,6 +397,7 @@ public:
 		_mapLB[ hostQueue ]; // Add an empty queue to the map
     }
 
+    // TODO: This should be done in a trashBin thread!!!
     bool deleteQueue( std::string hostQueue )
     {
 		LockPolicy  scopelock(_mx);
@@ -331,13 +414,15 @@ public:
 				
 				if( pConn != NULL )
 				{
-					pConn->close();
+                                        closeConnection<connType>( pConn );
 					delete pConn;
 				}
 			}
 			
 			_mapLB.erase( it );
 
+			_itLB = _mapLB.begin(); // reset the rotor
+			
 			return true;
 		}
 
@@ -346,13 +431,14 @@ public:
 
     void start() 
     { 
-        ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner > threader( this, manager ); 
-        threader.run();
+	keepalive_threader.run();
+	recycler_threader.run();
+	disabler_threader.run();
     } 
 
  private:
 
-    void manager()
+    void keepalive()
     {
         while(true)
         {   
@@ -367,21 +453,84 @@ public:
 
             if( pConn != NULL )
             {
-				bool alive = keepConnAlive( pConn );
-				
-				{   // Scope Locked
-					LockPolicy scope( _mx );
+		double alive_time = keepConnAlive<connType>( pConn );
+		
+		{   // Scope Locked
+			LockPolicy scope( _mx );
 
-					if( alive )
-						pushConnection( pConn );
-					else
-						pushRecycle( pConn );
-				}
+			if( alive_time < 0.0 )
+				pushRecycle( pConn );
+			else
+				pushConnection( pConn, alive_time );
+		}
             }
 
             ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 1000 );
         }
     }
+	
+    void recycler()
+    {
+	while(true)
+        {
+            connType *pConn = NULL;
+
+            {
+               LockPolicy  scopelock(_mx);
+               pConn = _recycling_bin.popConnection();
+            } 
+             
+            if( recycleConnection<connType>( pConn ) )
+            {
+                double alive_time = keepConnAlive<connType>( pConn );
+                {
+                    LockPolicy scope( _mx );
+                        
+                    if( alive_time < 0.0 )
+                            pushRecycle( pConn );
+                    else
+                            pushConnection( pConn, alive_time );
+                }
+
+                ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 200 );
+             
+                continue;
+            }
+            else
+            {
+                LockPolicy scope( _mx );
+                _recycling_bin.pushConnection( pConn ); 
+            }
+
+            ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 1000 );
+        }
+    }
+
+    void disabler()
+    {
+        while(true)
+        {
+            connType *pConn = NULL;
+
+            {
+               LockPolicy  scopelock(_mx);
+               pConn = _disable_bin.popConnection();
+            }
+
+            if( pConn != NULL )
+            {
+                closeConnection<connType>( pConn );
+                pushConnection( pConn, 0.0 );
+
+                ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 200 );
+
+                continue;
+            }
+
+            ThisThreader< ConnectionLoadBalancer, TaskThreadRunnner >::sleep( 1000 );
+        }
+    }
+
 };
 
 
@@ -412,7 +561,7 @@ class ConnectionPool
 		return conn;
 	}
 	
-	void pushConnection( connType* conn )
+	bool pushConnection( connType* conn )
 	{
 		if( !_favoredConns.pushConnection(conn) )
 		{
@@ -420,8 +569,11 @@ class ConnectionPool
 			{
 				conn->close();
 				delete conn;
+				return false;
 			}
 		}
+		
+		return true;
 	}
 	
 	void disableQueue( std::string hostQueue )
@@ -434,6 +586,12 @@ class ConnectionPool
 	{
 		if( !_favoredConns.enableQueue( hostQueue ) )
 			_otherConns.enableQueue( hostQueue );
+	}
+
+        void enableAllQueues()
+	{
+		_favoredConns.enableAll();
+		_otherConns.enableAll();
 	}
 	
 	void addFavoredQueue( std::string hostQueue )
@@ -450,6 +608,22 @@ class ConnectionPool
 	{
 		if( !_favoredConns.deleteQueue( hostQueue ) )
 			_otherConns.deleteQueue( hostQueue );
+	}
+
+        string poolStatusReport()
+        {
+                string report;
+		
+		report += "favored{" + _favoredConns.queueStatusReport() + "};";
+		report += "other{" + _otherConns.queueStatusReport() + "};";
+
+                return report;
+        }
+	
+	void start_pool_managers()
+	{
+		_favoredConns.start();
+		_otherConns.start();
 	}
 
 };
